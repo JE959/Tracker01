@@ -10,24 +10,31 @@ from flask import Flask, request, Response, make_response, abort
 app = Flask(__name__)
 
 # -------- CONFIG --------
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changeme")  # set this to a strong secret on Render
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changeme")  # set strong secret on Render
 DB_PATH = "events.db"
 
-# -------- DATABASE SETUP --------
+# -------- DATABASE SETUP WITH AUTO-MIGRATION --------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    # Create table if not exists
     cur.execute("""
         CREATE TABLE IF NOT EXISTS opens (
             id TEXT,
             ts TEXT,
             remote_addr TEXT,
-            x_forwarded_for TEXT,
-            real_ip TEXT,
             user_agent TEXT,
             referer TEXT
         )
     """)
+    conn.commit()
+    # Auto-add missing columns
+    columns_to_add = ["x_forwarded_for", "real_ip"]
+    cur.execute("PRAGMA table_info(opens)")
+    existing_columns = [info[1] for info in cur.fetchall()]
+    for col in columns_to_add:
+        if col not in existing_columns:
+            cur.execute(f"ALTER TABLE opens ADD COLUMN {col} TEXT")
     conn.commit()
     conn.close()
 
@@ -38,13 +45,8 @@ def get_db():
 
 # -------- UTIL: get real IP from headers --------
 def get_real_ip():
-    """
-    Prefer X-Forwarded-For's first entry (the client's public IP).
-    Fallback to request.remote_addr if header not present.
-    """
     raw_xff = request.headers.get("X-Forwarded-For", "")
     if raw_xff:
-        # X-Forwarded-For can be comma-separated. First entry is client's IP.
         real_ip = raw_xff.split(",")[0].strip()
     else:
         raw_xff = ""
@@ -62,20 +64,7 @@ TRANSPARENT_GIF = (
 # -------- PIXEL ENDPOINT --------
 @app.route("/pixel.gif")
 def pixel():
-    """
-    Tracking pixel endpoint.
-    Example: /pixel.gif?id=123
-    Stores:
-      - id (from query)
-      - ts (UTC)
-      - remote_addr (Flask's remote_addr)
-      - x_forwarded_for (raw header)
-      - real_ip (first IP from X-Forwarded-For or remote_addr)
-      - user_agent
-      - referer
-    """
     user_id = request.args.get("id", "")
-
     raw_xff, real_ip = get_real_ip()
     remote_addr = request.remote_addr or ""
     user_agent = request.headers.get("User-Agent", "")
@@ -98,7 +87,6 @@ def pixel():
     conn.commit()
     conn.close()
 
-    # Return 1x1 transparent GIF with cache headers (providers may ignore)
     resp = make_response(TRANSPARENT_GIF)
     resp.headers["Content-Type"] = "image/gif"
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
@@ -113,7 +101,7 @@ def require_admin():
     if token != ADMIN_TOKEN:
         abort(401)
 
-# -------- ADMIN PAGE (last 100 opens) --------
+# -------- ADMIN PAGE --------
 @app.route("/admin")
 def admin_page():
     require_admin()
@@ -133,7 +121,6 @@ def admin_page():
     rows = cur.fetchall()
     conn.close()
 
-    # Build HTML safely (escape values)
     rows_html = []
     for row in rows:
         rowid, uid, ts, remote_addr, xff, real_ip, ua, referer = row
@@ -156,43 +143,43 @@ def admin_page():
 
     page = f"""<!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Pixel Tracker — Admin</title>
-    <style>
-      body {{ font-family: system-ui, -apple-system, Roboto, 'Segoe UI', Arial, sans-serif; padding: 1rem; }}
-      table {{ border-collapse: collapse; width: 100%; max-width: 1200px; }}
-      th, td {{ border: 1px solid #ddd; padding: 6px 8px; text-align: left; font-size: 13px; vertical-align: top; }}
-      th {{ background: #f6f6f6; }}
-      tr:nth-child(even) {{ background: #fafafa; }}
-      .meta {{ margin-bottom: 1rem; }}
-      .actions {{ margin-bottom: 0.75rem; }}
-    </style>
-  </head>
-  <body>
-    <h1>Pixel Tracker — Recent Opens</h1>
-    <div class="meta">Showing {len(rows)} rows (most recent). <a href="/admin/download?token={token_param}">Download CSV</a></div>
-    <div class="actions">
-      <form method="GET" action="/admin" style="display:inline;">
-        <input type="hidden" name="token" value="{token_param}" />
-        Filter id: <input name="id" value="{filter_value}" /> <button type="submit">Filter</button>
-        <a href="/admin?token={token_param}">Clear</a>
-      </form>
-      &nbsp;&nbsp;
-      <a href="/admin/clear?token={token_param}" onclick="return confirm('Delete ALL records? This cannot be undone.')">🗑️ Delete ALL Records</a>
-    </div>
+<head>
+<meta charset="utf-8" />
+<title>Pixel Tracker — Admin</title>
+<style>
+body {{ font-family: system-ui, -apple-system, Roboto, 'Segoe UI', Arial, sans-serif; padding: 1rem; }}
+table {{ border-collapse: collapse; width: 100%; max-width: 1200px; }}
+th, td {{ border: 1px solid #ddd; padding: 6px 8px; text-align: left; font-size: 13px; vertical-align: top; }}
+th {{ background: #f6f6f6; }}
+tr:nth-child(even) {{ background: #fafafa; }}
+.actions {{ margin-bottom: 0.75rem; }}
+</style>
+</head>
+<body>
+<h1>Pixel Tracker — Recent Opens</h1>
+<div class="actions">
+  <form method="GET" action="/admin" style="display:inline;">
+    <input type="hidden" name="token" value="{token_param}" />
+    Filter id: <input name="id" value="{filter_value}" /> <button type="submit">Filter</button>
+    <a href="/admin?token={token_param}">Clear</a>
+  </form>
+  &nbsp;&nbsp;
+  <a href="/admin/clear?token={token_param}" onclick="return confirm('Delete ALL records? This cannot be undone.')">🗑️ Delete ALL Records</a>
+  &nbsp;&nbsp;
+  <a href="/admin/download?token={token_param}">Download CSV</a>
+</div>
 
-    <table>
-      <thead>
-        <tr>
-          <th>rowid</th><th>id</th><th>ts (UTC)</th><th>remote_addr</th><th>X-Forwarded-For</th><th>real_ip</th><th>user_agent</th><th>referer</th><th>action</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(rows_html)}
-      </tbody>
-    </table>
-  </body>
+<table>
+<thead>
+<tr>
+<th>rowid</th><th>id</th><th>ts (UTC)</th><th>remote_addr</th><th>X-Forwarded-For</th><th>real_ip</th><th>user_agent</th><th>referer</th><th>action</th>
+</tr>
+</thead>
+<tbody>
+{''.join(rows_html)}
+</tbody>
+</table>
+</body>
 </html>"""
     return Response(page, mimetype="text/html")
 
@@ -216,7 +203,6 @@ def admin_download():
     rows = cur.fetchall()
     conn.close()
 
-    # Build CSV
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["id", "ts", "remote_addr", "x_forwarded_for", "real_ip", "user_agent", "referer"])
@@ -259,5 +245,4 @@ def index():
 
 # -------- RUN (local) --------
 if __name__ == "__main__":
-    # For local testing, optionally set ADMIN_TOKEN env var before running.
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
