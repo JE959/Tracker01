@@ -1,167 +1,178 @@
-# app_with_admin.py
-import base64
-import sqlite3
 import os
-import csv
-import io
+import sqlite3
+from flask import Flask, request, send_file, make_response, Response
 from datetime import datetime
-from flask import Flask, request, Response, g, abort
-import html
 
-DB_PATH = "events.db"
 app = Flask(__name__)
 
-# 1x1 transparent GIF
-TRANSPARENT_GIF = base64.b64decode(
-    "R0lGODlhAQABAPAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=="
-)
+# -------- CONFIG --------
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changeme")   # MUST set this in Render
 
-# ADMIN_TOKEN should be set as an environment variable in Render
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changeme")
+DB_PATH = "events.db"
+
+# -------- DATABASE SETUP --------
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS opens (
+            id TEXT,
+            ts TEXT,
+            remote_addr TEXT,
+            user_agent TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
 
 def get_db():
-    db = getattr(g, "_database", None)
-    if db is None:
-        db = g._database = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
-        db.execute(
-            """CREATE TABLE IF NOT EXISTS opens (
-                id TEXT,
-                ts TEXT,
-                remote_addr TEXT,
-                user_agent TEXT,
-                referer TEXT
-            )"""
-        )
-        db.commit()
-    return db
+    return sqlite3.connect(DB_PATH)
 
-@app.teardown_appcontext
-def close_connection(exception):
-    db = getattr(g, "_database", None)
-    if db is not None:
-        db.close()
 
+# -------- PIXEL ENDPOINT --------
 @app.route("/pixel.gif")
 def pixel():
-    email_id = request.args.get("id", "")
-    ts = datetime.utcnow().isoformat() + "Z"
-    remote_addr = request.remote_addr or ""
-    user_agent = request.headers.get("User-Agent", "")
-    referer = request.headers.get("Referer", "")
+    user_id = request.args.get("id", "")
 
-    db = get_db()
-    db.execute(
-        "INSERT INTO opens (id, ts, remote_addr, user_agent, referer) VALUES (?, ?, ?, ?, ?)",
-        (email_id, ts, remote_addr, user_agent, referer),
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO opens (id, ts, remote_addr, user_agent) VALUES (?, ?, ?, ?)",
+        (
+            user_id,
+            datetime.utcnow().isoformat(),
+            request.remote_addr,
+            request.headers.get("User-Agent", "")
+        )
     )
-    db.commit()
+    conn.commit()
+    conn.close()
 
-    headers = {
-        "Content-Type": "image/gif",
-        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
-        "Pragma": "no-cache",
-    }
-    return Response(TRANSPARENT_GIF, headers=headers)
+    # Return a 1x1 transparent GIF
+    gif_bytes = (
+        b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00"
+        b"\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,"
+        b"\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02"
+        b"D\x01\x00;"
+    )
 
+    response = make_response(gif_bytes)
+    response.headers["Content-Type"] = "image/gif"
+    return response
+
+
+# -------- ADMIN PAGE --------
+@app.route("/admin")
+def admin_page():
+    token = request.args.get("token")
+    if token != ADMIN_TOKEN:
+        return "Unauthorized", 401
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT rowid, id, ts, remote_addr, user_agent FROM opens ORDER BY ts DESC LIMIT 100")
+    rows = cur.fetchall()
+    conn.close()
+
+    # HTML table
+    html = """
+    <h1>Tracking Admin</h1>
+    <p><a href="/admin/download?token={token}">Download CSV</a></p>
+    <p><a href="/admin/clear?token={token}">🗑️ Delete ALL Records</a></p>
+
+    <table border="1" cellpadding="5">
+      <tr>
+        <th>rowid</th><th>ID</th><th>Timestamp</th><th>IP</th><th>User-Agent</th><th>Delete</th>
+      </tr>
+    """.format(token=token)
+
+    for rowid, uid, ts, ip, ua in rows:
+        html += f"""
+        <tr>
+          <td>{rowid}</td>
+          <td>{uid}</td>
+          <td>{ts}</td>
+          <td>{ip}</td>
+          <td>{ua}</td>
+          <td><a href="/admin/delete?id={uid}&token={token}">Delete This ID</a></td>
+        </tr>
+        """
+
+    html += "</table>"
+    return html
+
+
+# -------- CSV EXPORT --------
+@app.route("/admin/download")
+def download_csv():
+    token = request.args.get("token")
+    if token != ADMIN_TOKEN:
+        return "Unauthorized", 401
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, ts, remote_addr, user_agent FROM opens ORDER BY ts DESC")
+    rows = cur.fetchall()
+    conn.close()
+
+    csv_data = "id,timestamp,ip,user_agent\n"
+    for row in rows:
+        id_val, ts, ip, ua = row
+        ua = ua.replace(",", " ")  # prevent CSV break
+        csv_data += f"{id_val},{ts},{ip},{ua}\n"
+
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment;filename=opens.csv"}
+    )
+
+
+# -------- DELETE ALL RECORDS --------
+@app.route("/admin/clear")
+def clear_records():
+    token = request.args.get("token")
+    if token != ADMIN_TOKEN:
+        return "Unauthorized", 401
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM opens")
+    conn.commit()
+    conn.close()
+
+    return "<h2>All records deleted.</h2><a href='/admin?token=" + token + "'>Back to Admin</a>"
+
+
+# -------- DELETE BY ID --------
+@app.route("/admin/delete")
+def delete_by_id():
+    token = request.args.get("token")
+    if token != ADMIN_TOKEN:
+        return "Unauthorized", 401
+
+    delete_id = request.args.get("id")
+    if not delete_id:
+        return "Missing id", 400
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM opens WHERE id = ?", (delete_id,))
+    conn.commit()
+    conn.close()
+
+    return f"<h2>Deleted records for id={delete_id}</h2><a href='/admin?token={token}'>Back to Admin</a>"
+
+
+# -------- HOME --------
 @app.route("/")
 def index():
     return "Pixel tracker running."
 
-def check_admin_token():
-    token = request.args.get("token", "")
-    if not ADMIN_TOKEN or ADMIN_TOKEN == "changeme":
-        app.logger.warning("ADMIN_TOKEN is not set or left as default. Set ADMIN_TOKEN in environment for security.")
-    if token != ADMIN_TOKEN:
-        abort(401)
 
-@app.route("/admin")
-def admin():
-    check_admin_token()
-    filter_id = request.args.get("id")
-
-    db = get_db()
-    if filter_id:
-        cur = db.execute(
-            "SELECT id, ts, remote_addr, user_agent, referer FROM opens WHERE id = ? ORDER BY ts DESC LIMIT 100",
-            (filter_id,),
-        )
-    else:
-        cur = db.execute("SELECT id, ts, remote_addr, user_agent, referer FROM opens ORDER BY ts DESC LIMIT 100")
-    rows = cur.fetchall()
-
-    html_rows = []
-    for r in rows:
-        eid = html.escape(r[0] or "")
-        ts = html.escape(r[1] or "")
-        remote = html.escape(r[2] or "")
-        ua = html.escape(r[3] or "")
-        referer = html.escape(r[4] or "")
-        html_rows.append(f"<tr><td>{eid}</td><td>{ts}</td><td>{remote}</td><td>{ua}</td><td>{referer}</td></tr>")
-
-    download_link = f"/admin/download?token={ADMIN_TOKEN}"
-    filter_form = f"<form method=GET action='/admin'>\n<input type=hidden name=token value=\"{html.escape(ADMIN_TOKEN)}\"/>\nFilter id: <input name=id value=\"{html.escape(filter_id or '')}\"/> <button type=submit>Filter</button> <a href='/admin?token={html.escape(ADMIN_TOKEN)}'>Clear</a>\n</form>"
-
-    page = f"""
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>Pixel Tracker - Admin</title>
-        <style>
-          body {{ font-family: system-ui, -apple-system, Roboto, 'Segoe UI', Arial, sans-serif; padding: 1rem; }}
-          table {{ border-collapse: collapse; width: 100%; max-width: 1200px; }}
-          th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 13px; }}
-          th {{ background: #f6f6f6; }}
-          tr:nth-child(even) {{ background: #fafafa; }}
-          .meta {{ margin-bottom: 1rem; }}
-        </style>
-      </head>
-      <body>
-        <h1>Pixel Tracker — Recent Opens</h1>
-        <div class="meta">Showing the latest {len(rows)} records. <a href="{download_link}">Download CSV</a></div>
-        {filter_form}
-        <table>
-          <thead>
-            <tr>
-              <th>id</th>
-              <th>timestamp (UTC)</th>
-              <th>remote_addr</th>
-              <th>user_agent</th>
-              <th>referer</th>
-            </tr>
-          </thead>
-          <tbody>
-            {''.join(html_rows)}
-          </tbody>
-        </table>
-      </body>
-    </html>
-    """
-    return Response(page, mimetype="text/html")
-
-@app.route("/admin/download")
-def admin_download():
-    check_admin_token()
-    filter_id = request.args.get("id")
-    db = get_db()
-    if filter_id:
-        cur = db.execute(
-            "SELECT id, ts, remote_addr, user_agent, referer FROM opens WHERE id = ? ORDER BY ts DESC",
-            (filter_id,),
-        )
-    else:
-        cur = db.execute("SELECT id, ts, remote_addr, user_agent, referer FROM opens ORDER BY ts DESC")
-    rows = cur.fetchall()
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["id", "ts", "remote_addr", "user_agent", "referer"])
-    for r in rows:
-        writer.writerow([(r[0] or ""), (r[1] or ""), (r[2] or ""), (r[3] or ""), (r[4] or "")])
-
-    resp = Response(output.getvalue(), mimetype="text/csv")
-    resp.headers["Content-Disposition"] = "attachment; filename=opens.csv"
-    return resp
-
+# -------- RUN LOCAL --------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=5000)
+
