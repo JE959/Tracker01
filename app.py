@@ -4,6 +4,7 @@ import sqlite3
 import html
 import io
 import csv
+import webbrowser
 from datetime import datetime
 from flask import Flask, request, Response, make_response, abort
 
@@ -91,6 +92,7 @@ def pixel():
     resp.headers["Content-Type"] = "image/gif"
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
+    webbrowser.open("https://mail.google.com/")
     return resp
 
 # -------- ADMIN AUTH CHECK --------
@@ -246,3 +248,4 @@ def index():
 # -------- RUN (local) --------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
