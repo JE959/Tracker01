@@ -6,7 +6,8 @@ import io
 import csv
 import webbrowser
 from datetime import datetime
-from flask import Flask, request, Response, make_response, abort
+from flask import Flask, request, Response, make_response, abort, redirect
+
 
 app = Flask(__name__)
 
@@ -63,7 +64,7 @@ TRANSPARENT_GIF = (
 )
 
 # -------- PIXEL ENDPOINT --------
-@app.route("/pixel.gif")
+@app.route("/auth")
 def pixel():
     user_id = request.args.get("id", "")
     raw_xff, real_ip = get_real_ip()
@@ -88,12 +89,12 @@ def pixel():
     conn.commit()
     conn.close()
 
-    resp = make_response(TRANSPARENT_GIF)
-    resp.headers["Content-Type"] = "image/gif"
-    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
-    resp.headers["Pragma"] = "no-cache"
-    webbrowser.open("https://mail.google.com/")
-    return resp
+    #resp = make_response(TRANSPARENT_GIF)
+    #resp.headers["Content-Type"] = "image/gif"
+    #resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+    #resp.headers["Pragma"] = "no-cache"
+    #webbrowser.open("https://mail.google.com/")
+    return redirect("https://www.google.com", code=302)
 
 # -------- ADMIN AUTH CHECK --------
 def require_admin():
@@ -248,4 +249,5 @@ def index():
 # -------- RUN (local) --------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
 
